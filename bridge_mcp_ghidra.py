@@ -57,6 +57,19 @@ def safe_post(endpoint: str, data: dict | str) -> str:
     except Exception as e:
         return f"Request failed: {str(e)}"
 
+def _address_params(address: str = None, offset: str = None, block: str = None) -> dict:
+    """
+    Build the addressing query parameters, forwarding only the values that were supplied.
+    """
+    params = {}
+    if address:
+        params["address"] = address
+    if offset:
+        params["offset"] = offset
+    if block:
+        params["block"] = block
+    return params
+
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100) -> list:
     """
@@ -286,6 +299,109 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
     if filter:
         params["filter"] = filter
     return safe_get("strings", params)
+
+@mcp.tool()
+def read_bytes(address: str = None, offset: str = None, block: str = None,
+               length: int = 64, format: str = "hex") -> list:
+    """
+    Read raw bytes from memory at a virtual address, a raw file offset, or a memory
+    block name plus offset.
+
+    Address precedence when several are supplied: address > block+offset > offset.
+
+    Args:
+        address: Virtual address, hex (e.g. "0x140001000") or decimal
+        offset: Raw file offset inside the loaded binary (hex or decimal)
+        block: Memory block name; combined with offset it is relative to the block start
+        length: Number of bytes to read (default 64, clamped to 1..8192)
+        format: "hex" (default, 16 bytes per line with an ASCII gutter) or "base64"
+
+    Returns:
+        Header line with the resolved address/block and read counts, then the bytes.
+        Reads past the end of a block return the readable bytes with a short read count.
+    """
+    params = _address_params(address, offset, block)
+    params["length"] = length
+    if format:
+        params["format"] = format
+    return safe_get("read_bytes", params)
+
+@mcp.tool()
+def read_data(address: str = None, offset: str = None, block: str = None, count: int = 1) -> list:
+    """
+    Read the defined, typed data items starting at a virtual address, a raw file offset,
+    or a memory block name plus offset.
+
+    Address precedence when several are supplied: address > block+offset > offset.
+
+    Args:
+        address: Virtual address, hex (e.g. "0x140020000") or decimal
+        offset: Raw file offset inside the loaded binary (hex or decimal)
+        block: Memory block name; combined with offset it is relative to the block start
+        count: Maximum number of consecutive data items to return (default 1, max 64)
+
+    Returns:
+        One line per item: "<address>: <label> = <value> [<type>, <n> bytes]".
+        When nothing is defined at the address the containing item is reported, or a
+        message suggesting read_bytes for raw bytes.
+    """
+    params = _address_params(address, offset, block)
+    params["count"] = count
+    return safe_get("read_data", params)
+
+@mcp.tool()
+def read_string(address: str = None, offset: str = None, block: str = None,
+                max_length: int = 256, encoding: str = "auto") -> str:
+    """
+    Decode the C string at a virtual address, a raw file offset, or a memory block name
+    plus offset.
+
+    Address precedence when several are supplied: address > block+offset > offset.
+
+    Args:
+        address: Virtual address, hex (e.g. "0x140030000") or decimal
+        offset: Raw file offset inside the loaded binary (hex or decimal)
+        block: Memory block name; combined with offset it is relative to the block start
+        max_length: Maximum number of bytes to scan (default 256, max 4096)
+        encoding: "auto" (default) | "ascii" | "utf8" | "utf16le" | "utf16be";
+                  "auto" honours the data type at the address, then detects UTF-16 by
+                  interleaved zero bytes, and otherwise falls back to ASCII/UTF-8
+
+    Returns:
+        One line: "<address>: \\"<escaped value>\\" (<byte length> bytes, <encoding>)".
+    """
+    params = _address_params(address, offset, block)
+    params["max_length"] = max_length
+    if encoding:
+        params["encoding"] = encoding
+    return "\n".join(safe_get("read_string", params))
+
+@mcp.tool()
+def read_pointer(address: str = None, offset: str = None, block: str = None,
+                 size: int = None, follow: bool = False) -> str:
+    """
+    Read a pointer-sized value at a virtual address, a raw file offset, or a memory
+    block name plus offset, and optionally follow it.
+
+    Address precedence when several are supplied: address > block+offset > offset.
+
+    Args:
+        address: Virtual address, hex (e.g. "0x140021000") or decimal
+        offset: Raw file offset inside the loaded binary (hex or decimal)
+        block: Memory block name; combined with offset it is relative to the block start
+        size: Pointer size in bytes ("4" or "8"); defaults to the program pointer size
+        follow: When True, also report the data at the target, or a 16-byte hex dump
+
+    Returns:
+        "<address>: <raw bytes> -> <target> (<symbol or unnamed>, block <name>)",
+        plus target detail lines when follow is True.
+    """
+    params = _address_params(address, offset, block)
+    if size is not None:
+        params["size"] = size
+    if follow:
+        params["follow"] = "true"
+    return "\n".join(safe_get("read_pointer", params))
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")

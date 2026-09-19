@@ -5,7 +5,10 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.mem.Memory;
+import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.mem.MemoryBlockSourceInfo;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.Reference;
@@ -54,6 +57,7 @@ import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -339,6 +343,55 @@ public class GhidraMCPPlugin extends Plugin {
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
             String filter = qparams.get("filter");
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
+        });
+
+        // ----------------------------------------------------------------------------------
+        // Read-only memory access endpoints
+        // ----------------------------------------------------------------------------------
+
+        server.createContext("/read_bytes", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            sendResponse(exchange, readBytes(
+                qparams.get("address"),
+                qparams.get("offset"),
+                qparams.get("block"),
+                parseIntOrDefault(qparams.get("length"), DEFAULT_READ_LENGTH),
+                qparams.get("format")
+            ));
+        });
+
+        server.createContext("/read_data", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            sendResponse(exchange, readData(
+                qparams.get("address"),
+                qparams.get("offset"),
+                qparams.get("block"),
+                parseIntOrDefault(qparams.get("count"), 1)
+            ));
+        });
+
+        server.createContext("/read_string", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            sendResponse(exchange, readString(
+                qparams.get("address"),
+                qparams.get("offset"),
+                qparams.get("block"),
+                parseIntOrDefault(qparams.get("max_length"), DEFAULT_STRING_MAX_LENGTH),
+                qparams.get("encoding")
+            ));
+        });
+
+        server.createContext("/read_pointer", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            Integer size = qparams.get("size") != null ? parseIntOrDefault(qparams.get("size"), 0) : null;
+            boolean follow = parseBooleanFlag(qparams.get("follow"));
+            sendResponse(exchange, readPointer(
+                qparams.get("address"),
+                qparams.get("offset"),
+                qparams.get("block"),
+                size,
+                follow
+            ));
         });
 
         server.setExecutor(null);
@@ -1525,6 +1578,502 @@ public class GhidraMCPPlugin extends Plugin {
             }
         }
         return null;
+    }
+
+    // ----------------------------------------------------------------------------------
+    // Read-only memory access helpers
+    // ----------------------------------------------------------------------------------
+
+    private static final int DEFAULT_READ_LENGTH = 64;
+    private static final int MAX_READ_LENGTH = 8192;
+    private static final int MAX_DATA_ITEMS = 64;
+    private static final int DEFAULT_STRING_MAX_LENGTH = 256;
+    private static final int MAX_STRING_LENGTH = 4096;
+
+    /**
+     * Parses a decimal or "0x"-prefixed hexadecimal number; returns null when unparsable.
+     */
+    private Long parseLongOrNull(String value) {
+        if (value == null || value.isEmpty()) return null;
+        String trimmed = value.trim();
+        try {
+            if (trimmed.startsWith("0x") || trimmed.startsWith("0X")) {
+                return Long.parseUnsignedLong(trimmed.substring(2), 16);
+            }
+            return Long.parseLong(trimmed);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Formats an address with a "0x" prefix, e.g. "0x140001000".
+     */
+    private String formatAddress(Address address) {
+        return "0x" + address.toString(false);
+    }
+
+    /**
+     * Resolves the address for the given query parameters, applying the precedence
+     * address &gt; block+offset &gt; file offset. Throws IllegalArgumentException with a
+     * user-facing message when no valid addressing mode was supplied.
+     */
+    private Address resolveAddressFromParams(Program program, Map<String, String> params) {
+        String addressParam = params.get("address");
+        String blockParam = params.get("block");
+        String offsetParam = params.get("offset");
+
+        if (addressParam != null && !addressParam.isEmpty()) {
+            Address addr = null;
+            try {
+                addr = program.getAddressFactory().getAddress(addressParam);
+            } catch (Exception e) {
+                addr = null;
+            }
+            if (addr == null) {
+                Long numeric = parseLongOrNull(addressParam);
+                if (numeric == null) {
+                    throw new IllegalArgumentException("Invalid address: " + addressParam);
+                }
+                addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(numeric);
+            }
+            return addr;
+        }
+
+        if (blockParam != null && !blockParam.isEmpty()) {
+            MemoryBlock block = program.getMemory().getBlock(blockParam);
+            if (block == null) {
+                throw new IllegalArgumentException("Unknown memory block: " + blockParam);
+            }
+            long blockOffset = 0;
+            if (offsetParam != null && !offsetParam.isEmpty()) {
+                Long numeric = parseLongOrNull(offsetParam);
+                if (numeric == null) {
+                    throw new IllegalArgumentException("Invalid offset: " + offsetParam);
+                }
+                blockOffset = numeric;
+            }
+            try {
+                return block.getStart().add(blockOffset);
+            } catch (RuntimeException e) {
+                throw new IllegalArgumentException("Invalid offset: " + offsetParam);
+            }
+        }
+
+        if (offsetParam != null && !offsetParam.isEmpty()) {
+            Long numeric = parseLongOrNull(offsetParam);
+            if (numeric == null) {
+                throw new IllegalArgumentException("Invalid offset: " + offsetParam);
+            }
+            Address addr = addressForFileOffset(program, numeric);
+            if (addr == null) {
+                throw new IllegalArgumentException(String.format("No memory block covers file offset 0x%x", numeric));
+            }
+            return addr;
+        }
+
+        throw new IllegalArgumentException("Address, offset or block+offset is required");
+    }
+
+    /**
+     * Maps a raw file offset to the address that maps it, or null when no block covers it.
+     */
+    private Address addressForFileOffset(Program program, long fileOffset) {
+        for (MemoryBlock block : program.getMemory().getBlocks()) {
+            for (MemoryBlockSourceInfo info : block.getSourceInfos()) {
+                Address addr = info.locateAddressForFileOffset(fileOffset);
+                if (addr != null) {
+                    return addr;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Human-readable description of the resolved address: the containing memory block name.
+     */
+    private String describeAddress(Program program, Address address) {
+        MemoryBlock block = program.getMemory().getBlock(address);
+        return block != null ? block.getName() : "(unmapped)";
+    }
+
+    /**
+     * Gap-tolerant chunked read: reads up to length bytes, stopping at the first unmapped
+     * or uninitialized block. Returns only the bytes that were actually read.
+     */
+    private byte[] readBytesAt(Program program, Address start, int length) {
+        Memory memory = program.getMemory();
+        byte[] buffer = new byte[length];
+        int totalRead = 0;
+        Address current = start;
+        while (totalRead < length) {
+            MemoryBlock block = memory.getBlock(current);
+            if (block == null || !block.isInitialized()) {
+                break;
+            }
+            long remaining = block.getEnd().subtract(current) + 1;
+            int chunk = (int) Math.min((long) (length - totalRead), remaining);
+            if (chunk <= 0) {
+                break;
+            }
+            try {
+                int read = memory.getBytes(current, buffer, totalRead, chunk);
+                if (read <= 0) {
+                    break;
+                }
+                totalRead += read;
+                current = current.add(read);
+            } catch (MemoryAccessException e) {
+                break;
+            } catch (RuntimeException e) {
+                break;
+            }
+        }
+        return Arrays.copyOf(buffer, totalRead);
+    }
+
+    /**
+     * Formats bytes as 16-bytes-per-line hex with an ASCII gutter.
+     */
+    private String formatHexDump(Address start, byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < bytes.length; i += 16) {
+            int end = Math.min(i + 16, bytes.length);
+            StringBuilder hex = new StringBuilder();
+            StringBuilder ascii = new StringBuilder();
+            for (int j = i; j < end; j++) {
+                int b = bytes[j] & 0xFF;
+                hex.append(String.format("%02x", b));
+                if (j < end - 1) {
+                    hex.append(' ');
+                }
+                ascii.append((b >= 32 && b < 127) ? (char) b : '.');
+            }
+            for (int k = 0; k < 16 - (end - i); k++) {
+                hex.append("   ");
+            }
+            sb.append(String.format("%s: %s |%s|", formatAddress(start.add(i)), hex, ascii));
+            if (end < bytes.length) {
+                sb.append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Encodes bytes as a single base64 line.
+     */
+    private String encodeBase64(byte[] bytes) {
+        return "base64:" + Base64.getEncoder().encodeToString(bytes);
+    }
+
+    /**
+     * GET /read_bytes implementation: raw bytes at an address/offset in hex or base64.
+     */
+    private String readBytes(String addressParam, String offsetParam, String blockParam,
+                             int requestedLength, String format) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        int length = Math.max(1, Math.min(MAX_READ_LENGTH, requestedLength));
+
+        Map<String, String> params = new HashMap<>();
+        if (addressParam != null) params.put("address", addressParam);
+        if (offsetParam != null) params.put("offset", offsetParam);
+        if (blockParam != null) params.put("block", blockParam);
+
+        Address start;
+        try {
+            start = resolveAddressFromParams(program, params);
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+
+        MemoryBlock block = program.getMemory().getBlock(start);
+        if (block == null || !block.isInitialized()) {
+            return String.format("Address %s is not in an initialized memory block", formatAddress(start));
+        }
+
+        byte[] bytes = readBytesAt(program, start, length);
+
+        boolean fileOffsetMode = (addressParam == null || addressParam.isEmpty())
+                && (blockParam == null || blockParam.isEmpty())
+                && offsetParam != null && !offsetParam.isEmpty();
+
+        String header;
+        if (fileOffsetMode) {
+            Long fileOffset = parseLongOrNull(offsetParam);
+            header = String.format("# fileOffset=0x%x -> address=%s block=%s read=%d requested=%d",
+                fileOffset, formatAddress(start), escapeNonAscii(block.getName()), bytes.length, length);
+        } else {
+            header = String.format("# address=%s block=%s read=%d requested=%d",
+                formatAddress(start), escapeNonAscii(block.getName()), bytes.length, length);
+        }
+
+        String body = "base64".equalsIgnoreCase(format)
+            ? encodeBase64(bytes)
+            : formatHexDump(start, bytes);
+
+        return body.isEmpty() ? header : header + "\n" + body;
+    }
+
+    /**
+     * Formats a defined data item as "<addr>: <label> = <value> [<type>, <n> bytes]".
+     */
+    private String formatDataItem(Data data) {
+        String label = data.getLabel() != null ? data.getLabel() : "(unnamed)";
+        String valRepr = data.getDefaultValueRepresentation();
+        String typeName = data.getDataType() != null ? data.getDataType().getName() : "unknown";
+        return String.format("%s: %s = %s [%s, %d bytes]",
+            formatAddress(data.getAddress()),
+            escapeNonAscii(label),
+            escapeNonAscii(valRepr != null ? valRepr : ""),
+            escapeNonAscii(typeName),
+            data.getLength());
+    }
+
+    /**
+     * GET /read_data implementation: defined, typed data items at an address.
+     */
+    private String readData(String addressParam, String offsetParam, String blockParam, int requestedCount) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        int count = Math.max(1, Math.min(MAX_DATA_ITEMS, requestedCount));
+
+        Map<String, String> params = new HashMap<>();
+        if (addressParam != null) params.put("address", addressParam);
+        if (offsetParam != null) params.put("offset", offsetParam);
+        if (blockParam != null) params.put("block", blockParam);
+
+        Address start;
+        try {
+            start = resolveAddressFromParams(program, params);
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+
+        List<String> lines = new ArrayList<>();
+        if (program.getListing().getDefinedDataAt(start) != null) {
+            DataIterator it = program.getListing().getDefinedData(start, true);
+            while (it.hasNext() && lines.size() < count) {
+                lines.add(formatDataItem(it.next()));
+            }
+        } else {
+            Data containing = program.getListing().getDataContaining(start);
+            if (containing != null) {
+                lines.add(formatDataItem(containing));
+            } else {
+                return String.format("No defined data at %s; use read_bytes for raw bytes", formatAddress(start));
+            }
+        }
+
+        return String.join("\n", lines);
+    }
+
+    /**
+     * Parses a query flag such as ?follow=true; absent values are false.
+     */
+    private boolean parseBooleanFlag(String value) {
+        return value != null && (value.equalsIgnoreCase("true")
+            || value.equals("1") || value.equalsIgnoreCase("yes"));
+    }
+
+    /**
+     * Charset for one of the supported string encoding names.
+     */
+    private Charset charsetFor(String encoding) {
+        switch (encoding) {
+            case "UTF-8": return StandardCharsets.UTF_8;
+            case "UTF-16LE": return StandardCharsets.UTF_16LE;
+            case "UTF-16BE": return StandardCharsets.UTF_16BE;
+            default: return StandardCharsets.US_ASCII;
+        }
+    }
+
+    /**
+     * Detects the encoding of the C string at an address, defaulting to ASCII/UTF-8.
+     */
+    private String detectStringEncoding(Program program, Address start, byte[] bytes) {
+        Data data = program.getListing().getDefinedDataAt(start);
+        if (data != null && data.getDataType() != null) {
+            String typeName = data.getDataType().getName().toLowerCase();
+            if (typeName.contains("utf16") || typeName.contains("utf-16")
+                    || typeName.contains("unicode")) {
+                return program.getMemory().isBigEndian() ? "UTF-16BE" : "UTF-16LE";
+            }
+        }
+        // Interleaved zero bytes indicate UTF-16; the zero position selects the endianness.
+        boolean zeroAtOdd = false;
+        boolean zeroAtEven = false;
+        for (int i = 0; i + 1 < bytes.length && i < 32; i += 2) {
+            if (bytes[i] != 0 && bytes[i + 1] == 0) zeroAtOdd = true;
+            if (bytes[i] == 0 && bytes[i + 1] != 0) zeroAtEven = true;
+        }
+        if (zeroAtOdd && !zeroAtEven) return "UTF-16LE";
+        if (zeroAtEven && !zeroAtOdd) return "UTF-16BE";
+        return "ASCII";
+    }
+
+    /**
+     * Length in bytes of a C string, stopping at the first terminator;<br>
+     * the terminator is two bytes wide for UTF-16 encodings.
+     */
+    private int stringByteLength(byte[] bytes, String encoding) {
+        if (encoding.startsWith("UTF-16")) {
+            for (int i = 0; i + 1 < bytes.length; i += 2) {
+                if (bytes[i] == 0 && bytes[i + 1] == 0) return i;
+            }
+            return bytes.length % 2 == 0 ? bytes.length : bytes.length - 1;
+        }
+        for (int i = 0; i < bytes.length; i++) {
+            if (bytes[i] == 0) return i;
+        }
+        return bytes.length;
+    }
+
+    /**
+     * GET /read_string implementation: decodes a C string at an address.
+     */
+    private String readString(String addressParam, String offsetParam, String blockParam,
+                              int requestedMaxLength, String encoding) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        int maxLength = Math.max(1, Math.min(MAX_STRING_LENGTH, requestedMaxLength));
+
+        Map<String, String> params = new HashMap<>();
+        if (addressParam != null) params.put("address", addressParam);
+        if (offsetParam != null) params.put("offset", offsetParam);
+        if (blockParam != null) params.put("block", blockParam);
+
+        Address start;
+        try {
+            start = resolveAddressFromParams(program, params);
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+
+        MemoryBlock block = program.getMemory().getBlock(start);
+        if (block == null || !block.isInitialized()) {
+            return String.format("Address %s is not in an initialized memory block", formatAddress(start));
+        }
+
+        byte[] raw = readBytesAt(program, start, maxLength);
+
+        String requested = (encoding == null || encoding.isEmpty()) ? "auto" : encoding.toLowerCase();
+        String usedEncoding;
+        switch (requested) {
+            case "ascii": usedEncoding = "ASCII"; break;
+            case "utf8": usedEncoding = "UTF-8"; break;
+            case "utf16le": usedEncoding = "UTF-16LE"; break;
+            case "utf16be": usedEncoding = "UTF-16BE"; break;
+            default: usedEncoding = detectStringEncoding(program, start, raw); break;
+        }
+
+        int byteLength = stringByteLength(raw, usedEncoding);
+        String decoded = new String(raw, 0, byteLength, charsetFor(usedEncoding));
+        return String.format("%s: \"%s\" (%d bytes, %s)",
+            formatAddress(start), escapeString(decoded), byteLength, usedEncoding);
+    }
+
+    /**
+     * Space-separated hex representation of bytes, e.g. "00 20 40 00".
+     */
+    private String hexBytes(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < bytes.length; i++) {
+            if (i > 0) sb.append(' ');
+            sb.append(String.format("%02x", bytes[i] & 0xFF));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Symbol/label at an address, or "(unnamed)" when none is present.
+     */
+    private String symbolAt(Program program, Address address) {
+        Symbol symbol = program.getSymbolTable().getPrimarySymbol(address);
+        if (symbol != null && symbol.getName() != null && !symbol.getName().isEmpty()) {
+            return escapeNonAscii(symbol.getName());
+        }
+        return "(unnamed)";
+    }
+
+    /**
+     * GET /read_pointer implementation: reads a pointer value and optionally follows it.
+     */
+    private String readPointer(String addressParam, String offsetParam, String blockParam,
+                               Integer requestedSize, boolean follow) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        int size = requestedSize != null ? requestedSize : program.getDefaultPointerSize();
+        if (size != 4 && size != 8) {
+            return "Invalid size: " + size + " (expected 4 or 8)";
+        }
+
+        Map<String, String> params = new HashMap<>();
+        if (addressParam != null) params.put("address", addressParam);
+        if (offsetParam != null) params.put("offset", offsetParam);
+        if (blockParam != null) params.put("block", blockParam);
+
+        Address start;
+        try {
+            start = resolveAddressFromParams(program, params);
+        } catch (IllegalArgumentException e) {
+            return e.getMessage();
+        }
+
+        MemoryBlock block = program.getMemory().getBlock(start);
+        if (block == null || !block.isInitialized()) {
+            return String.format("Address %s is not in an initialized memory block", formatAddress(start));
+        }
+
+        byte[] raw = readBytesAt(program, start, size);
+        if (raw.length < size) {
+            return String.format("Could not read %d bytes at %s (read %d)",
+                size, formatAddress(start), raw.length);
+        }
+
+        boolean bigEndian = program.getMemory().isBigEndian();
+        long value = 0;
+        for (int i = 0; i < size; i++) {
+            int b = raw[i] & 0xFF;
+            if (bigEndian) {
+                value = (value << 8) | b;
+            } else {
+                value |= ((long) b) << (8 * i);
+            }
+        }
+
+        Address target = program.getAddressFactory().getDefaultAddressSpace().getAddress(value);
+        MemoryBlock targetBlock = program.getMemory().getBlock(target);
+        String targetBlockName = targetBlock != null ? escapeNonAscii(targetBlock.getName()) : "unmapped";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("%s: %s -> %s (%s, block %s)",
+            formatAddress(start), hexBytes(raw), formatAddress(target),
+            symbolAt(program, target), targetBlockName));
+
+        if (follow && targetBlock != null && targetBlock.isInitialized()) {
+            Data data = program.getListing().getDefinedDataAt(target);
+            if (data == null) {
+                data = program.getListing().getDataContaining(target);
+            }
+            if (data != null) {
+                sb.append('\n').append("target ").append(formatDataItem(data));
+            } else {
+                byte[] targetBytes = readBytesAt(program, target, 16);
+                if (targetBytes.length > 0) {
+                    sb.append('\n').append("target ").append(formatAddress(target)).append(":\n");
+                    sb.append(formatHexDump(target, targetBytes));
+                }
+            }
+        }
+
+        return sb.toString();
     }
 
     // ----------------------------------------------------------------------------------

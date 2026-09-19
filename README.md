@@ -20,6 +20,7 @@ MCP Server + Ghidra Plugin
 - Decompile and analyze binaries in Ghidra
 - Automatically rename methods and data
 - List methods, classes, imports, and exports
+- Read raw bytes, typed data, strings and pointers at virtual addresses, file offsets, or memory block offsets
 
 # Installation
 
@@ -97,6 +98,46 @@ Another MCP client that supports multiple models on the backend is [5ire](https:
 1. Tool Key: ghidra
 2. Name: GhidraMCP
 3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
+
+# Reading Memory
+The bridge exposes four read-only tools (`read_bytes`, `read_data`, `read_string`, `read_pointer`) backed by the matching HTTP endpoints. Every endpoint accepts one of three addressing modes:
+
+- `address` – virtual address, hex (`0x140001000`) or decimal
+- `offset` – raw file offset inside the loaded binary
+- `block` + `offset` – offset relative to the start of the named memory block
+
+Precedence when several are supplied: `address` > `block`+`offset` > `offset`. Responses are plain text and include the resolved address, so an offset-based request can be mapped back to an address.
+
+## `read_bytes`
+Read raw bytes; `length` defaults to `64` (clamped to `1..8192`) and `format` is `hex` (default, 16 bytes per line with an ASCII gutter) or `base64`.
+
+```bash
+curl "http://127.0.0.1:8080/read_bytes?address=0x140001000&length=32"
+curl "http://127.0.0.1:8080/read_bytes?offset=0x400&length=16"
+curl "http://127.0.0.1:8080/read_bytes?block=.text&offset=0x10&format=base64"
+```
+
+## `read_data`
+Read the defined, typed data items starting at the address; `count` defaults to `1` (max `64`). Each line is `<address>: <label> = <value> [<type>, <n> bytes]`; when nothing is defined at the address the containing item is reported.
+
+```bash
+curl "http://127.0.0.1:8080/read_data?address=0x140020000&count=3"
+```
+
+## `read_string`
+Decode the C string at the address; `max_length` defaults to `256` (max `4096`) and `encoding` is `auto` (default), `ascii`, `utf8`, `utf16le` or `utf16be`. `auto` honours the data type at the address, detects UTF-16 by interleaved zero bytes, and otherwise falls back to ASCII/UTF-8.
+
+```bash
+curl "http://127.0.0.1:8080/read_string?address=0x140030000"
+curl "http://127.0.0.1:8080/read_string?address=0x140030000&encoding=utf16le"
+```
+
+## `read_pointer`
+Read a pointer-sized value, decoded using the program endianness; `size` defaults to the program pointer size (allowed `4` or `8`). `follow=true` additionally reports the typed data at the target, or a 16-byte hex dump when none is defined there.
+
+```bash
+curl "http://127.0.0.1:8080/read_pointer?address=0x140021000&follow=true"
+```
 
 # Building from Source
 1. Copy the following files from your Ghidra directory to this project's `lib/` directory:
