@@ -21,6 +21,12 @@ MCP Server + Ghidra Plugin
 - Automatically rename methods and data
 - List methods, classes, imports, and exports
 - Read raw bytes, typed data, strings and pointers at virtual addresses, file offsets, or memory block offsets
+- Introspect a function's real signature, calling convention, parameters and locals
+- Inspect struct, union, enum and typedef layouts, and read back existing comments
+- Walk callers and callees to a bounded depth in one call
+- Search memory for hex signatures with `??` wildcards and find symbols with regular expressions
+- Summarise a program's language, compiler, layout, counts and entry points in one call
+- Every listing ends with a "# showing X-Y of N" total so pagination is predictable
 - Work across several Ghidra windows and all of their open programs in one session
 - Configurable request timeout, retries and logging in the MCP bridge
 
@@ -206,6 +212,22 @@ current=bar.exe
 
 The `service=ghidra-mcp` line is the fingerprint the bridge looks for when it probes a port range, and `port` may differ from the configured value.
 
+# Listing Totals
+Every paginated listing endpoint ends with a `#`-prefixed summary line, so a client can tell how much data exists and whether it has to request another page instead of guessing. This covers `/methods`, `/classes`, `/segments`, `/imports`, `/exports`, `/namespaces`, `/data`, `/strings`, the function-name search, the xref listings and `/list_open_programs`, as well as the newer listings.
+
+```
+libfoo.so | /proj/libfoo.so | x86:LE:64:default | current
+bar.exe   | /proj/bar.exe   | x86:LE:32:default | open
+
+# showing 1-2 of 2
+```
+
+- `# showing 1-100 of 4823` – the page contains items 1 to 100 of 4823
+- `# showing 0 of 0` – the listing is empty
+- `# showing 0 of 4823 (offset 5000)` – the requested `offset` is past the end, so no data lines follow
+
+The summary is always the last line of the response body (and therefore the last element of a bridge tool's result list). Listings that keep a dedicated empty-state message, such as `No functions matching 'foo'`, print that message first and the summary right after it.
+
 # Reading Memory
 The bridge exposes four read-only tools (`read_bytes`, `read_data`, `read_string`, `read_pointer`) backed by the matching HTTP endpoints. Every endpoint accepts one of three addressing modes:
 
@@ -248,6 +270,181 @@ curl "http://127.0.0.1:8080/read_pointer?address=0x140021000&follow=true"
 
 Responses are UTF-8 plain text. Non-ASCII characters in listing and memory output (for example a non-ASCII symbol label) are escaped as full code units, e.g. `caf\xe9`; characters above `U+00FF` keep their whole value instead of being truncated to one byte.
 
+# Function Introspection and Comments
+Three read-only tools describe a function without decompiling it and let a client read back the comments an earlier analysis wrote. Every one of them accepts either `address` (an address at or inside the function) or `name` (an exact function name); `address` wins when both are given.
+
+## `get_function_details`
+Report the real declaration of a function instead of guessing it from the decompiled C:
+
+```bash
+curl "http://127.0.0.1:8080/get_function_details?address=0x140001000"
+curl "http://127.0.0.1:8080/get_function_details?name=main"
+```
+```
+Function: FUN_140001000
+Entry: 0x140001000
+Signature: int __cdecl FUN_140001000(int a, char * b)
+Calling convention: __cdecl
+Return type: int (4 bytes)
+Parameters: 2
+Stack frame: 16
+Body: 0x140001000 - 0x1400010a3 (164 bytes)
+Flags: thunk=false noReturn=false varArgs=false external=false inline=false
+Callers: 3
+Callees: 5
+```
+
+The caller/callee counts are immediate, i.e. one level; use `get_callers`/`get_callees` to walk further.
+
+## `list_function_variables`
+List the parameters and locals with their type, size, storage and the address of their first use. `offset` (default `0`) and `limit` (default `100`, max `1000`) paginate, and auto-parameters are marked so they are not renamed:
+
+```bash
+curl "http://127.0.0.1:8080/list_function_variables?name=main"
+```
+```
+param a : int (4 bytes) [Stack[0x4]] @ 0x140001000
+param (auto) __return_storage_ptr__ : void * (8 bytes) [RAX:8] @ 0x140001000
+local local_10 : undefined4 (4 bytes) [Stack[-0x10]] @ 0x140001004
+
+# showing 1-3 of 3
+```
+
+## `get_comments`
+Read the `PRE`, `EOL`, `PLATE` and `POST` comments at one address (`scope=address`, the default when only `address` is given) or everywhere in a function body (`scope=function`, the default when `name` is given, also selectable explicitly):
+
+```bash
+curl "http://127.0.0.1:8080/get_comments?address=0x140001010"
+curl "http://127.0.0.1:8080/get_comments?name=main&scope=function"
+```
+```
+0x140001010:
+  PRE: entry of the check
+  EOL: compare flags
+```
+
+Function scope reports one block per commented code unit and paginates those blocks with `offset` (default `0`) and `limit` (default `200`, max `1000`), so a comment is never split from its address. An address with no comment answers `No comments at <address>:`; a function without any answers `No comments in function <name>` followed by the summary.
+
+# Data Types
+## `list_data_types`
+Enumerate every data type the program knows, with its kind and size. `filter` is a case-insensitive substring matched against the type name or its full path; `offset` (default `0`) and `limit` (default `100`, max `1000`) paginate:
+
+```bash
+curl "http://127.0.0.1:8080/list_data_types?filter=vector"
+```
+```
+/user/vector.h/VECTOR3 (struct, 12 bytes)
+/eh/EHExceptionRecord (struct, 32 bytes)
+char (builtin, 1 bytes)
+
+# showing 1-3 of 412
+```
+
+The kind is one of `struct`, `union`, `enum`, `typedef`, `pointer`, `array`, `function` or `builtin`.
+
+## `get_data_type`
+Inspect one type by simple name or full path. Structures and unions print one line per field with offset, name, type and size, plus any field comment; enums print their member/value pairs; typedefs print the aliased type; simple types print their size and description:
+
+```bash
+curl "http://127.0.0.1:8080/get_data_type?name=VECTOR3"
+curl "http://127.0.0.1:8080/get_data_type?name=/user/vector.h/VECTOR3"
+```
+```
+Name: VECTOR3
+Kind: struct
+Size: 12
+Path: /user/vector.h/VECTOR3
+Fields: 3
++0x0    x : float (4)
++0x4    y : float (4)   // vertical component
++0x8    z : float (4)
+```
+
+An unknown name answers `Data type not found: '<name>'`. A name that matches several types in different categories answers `Data type 'x' is ambiguous; candidates:` followed by one `<path> (<kind>, <n> bytes)` line per candidate, so nothing is picked arbitrarily.
+
+# Call Graph
+## `get_callers` / `get_callees`
+Traverse the call graph in one call instead of chaining xrefs. Both accept `address` or `name`, a `depth` clamped to `1..4` (default `1`) and the usual `offset` (default `0`) / `limit` (default `100`, max `1000`) pagination.
+
+```bash
+curl "http://127.0.0.1:8080/get_callers?name=FUN_140001000&depth=2"
+curl "http://127.0.0.1:8080/get_callees?address=0x140001000&depth=2"
+```
+```
+d1 0x140002100 FUN_140002100 (caller of FUN_140001000)
+d2 0x140003000 FUN_140003000 (caller of FUN_140002100)
+
+# showing 1-2 of 2
+```
+
+`get_callers` follows every reference to the function's entry point and attributes the referring address to the function that contains it; `get_callees` follows `getCalledFunctions`. Every line carries the depth (`d1`, `d2`, …), the function's entry point, its name and its relation to the previous level. A function is reported once, at the shallowest depth it is reachable at, so mutual recursion terminates instead of looping.
+
+# Search
+## `search_bytes`
+Find a hex signature anywhere in initialized memory. `pattern` is whitespace-separated tokens, each either two hex digits or `??` for "any byte", and is capped at 256 bytes:
+
+```bash
+curl "http://127.0.0.1:8080/search_bytes?pattern=48%208b%20%3F%3F%2040"
+curl "http://127.0.0.1:8080/search_bytes?pattern=7f%2045%204c%2046&block=.text"
+```
+```
+0x140001234 in .text (FUN_140001200): 48 8b 05 40
+
+# showing 1-1 of 1
+```
+
+- Uninitialized blocks are skipped, and the optional `block=<name>` narrows the scan to one block.
+- `offset` (default `0`) and `limit` (default `100`, max `5000`) paginate the matches, and the scan stops as soon as the requested page is full, so an early page never walks the whole binary. A full page therefore means more matches may follow.
+- Invalid patterns answer with a message naming the offending token, e.g. `Invalid byte pattern token 'xZ' (expected two hex digits or ??)`; a pattern longer than 256 bytes and an unknown `block` are reported the same way.
+- Addresses are reported with the matched bytes in memory order, so they line up with `/read_bytes` for the same address.
+
+## `search_symbols`
+Search function, label and data names with a regular expression instead of a substring. The query is matched anywhere in the name and is case-insensitive unless `case_sensitive=true`:
+
+```bash
+curl "http://127.0.0.1:8080/search_symbols?query=FUN_.*10%24"
+curl "http://127.0.0.1:8080/search_symbols?query=vector&kind=data"
+```
+```
+FUN_140001000 function @ 0x140001000
+my_global label @ 0x140100000
+
+# showing 1-2 of 2
+```
+
+`kind` selects `any` (default), `function`, `label` (a symbol without defined data) or `data` (a symbol sitting on defined data). Names are namespace-qualified when they live in a namespace, e.g. `Foo::bar`. An invalid regular expression answers `Invalid regular expression: <message>` instead of failing the request.
+
+# Program Information
+## `get_program_info`
+Recommended as the first call on a newly loaded program: one request reports the architecture, the compiler, the memory layout and the scale of the binary, so an analysis can be planned before any function is touched.
+
+```bash
+curl "http://127.0.0.1:8080/get_program_info"
+```
+```
+Program: libfoo.so
+File: /tmp/libfoo.so
+Language: x86:LE:64:default
+Compiler: gcc (gcc)
+Endianness: little
+Address size: 8
+Image base: 0x140000000
+Address range: 0x140000000 - 0x1400fffff
+Memory blocks: 6
+Functions: 4823
+Symbols: 12034
+Defined data: 2311
+Executable format: ELF
+Executable MD5: 9f2c5e1e5b9d4b0e8d3a6f2c8b7a1d4e
+Entry points:
+  0x140001000 on
+  0x140002000 call_weak_fn
+
+# showing 1-2 of 2
+```
+
+The counts match what `/methods`, `/data` and `/segments` report for the same program, so they can be used as cross-checks. `offset` (default `0`) and `limit` (default `100`, max `1000`) paginate only the entry-point list. Fields that the loaded format does not provide answer `unknown`.
+
 # Development
 The extension is split into small, single-responsibility packages:
 
@@ -256,10 +453,13 @@ src/main/java/com/lauriewired/
   GhidraMCPPlugin.java   plugin lifecycle only: tool option, server start/stop, dispose
   server/                embedded HTTP server: bootstrap, single route table, responses
   handlers/              one class per endpoint group: listing, xrefs, memory,
-                         decompilation, mutations, prototypes, server metadata
+                         decompilation, mutations, prototypes, server metadata,
+                         function introspection, comments, data types, call graph,
+                         search, program info
   service/               shared Ghidra access: current program, Swing transactions,
-                         decompiler reuse, address resolution
-  util/                  dependency-free helpers: query/body parsing, pagination, escaping
+                         decompiler reuse, address resolution, function lookup
+  util/                  dependency-free helpers: query/body parsing, pagination,
+                         escaping, byte patterns
 ```
 
 Run the unit tests:

@@ -45,7 +45,7 @@ public class XrefHandlers {
                 refs.add(String.format("From %s%s [%s]", fromAddr, funcInfo, refType.getName()));
             }
             
-            return Paginator.paginate(refs, offset, limit);
+            return Paginator.paginateWithTotal(refs, offset, limit);
         } catch (Exception e) {
             return "Error getting references to address: " + e.getMessage();
         }
@@ -84,7 +84,7 @@ public class XrefHandlers {
                 refs.add(String.format("To %s%s [%s]", toAddr, targetInfo, refType.getName()));
             }
             
-            return Paginator.paginate(refs, offset, limit);
+            return Paginator.paginateWithTotal(refs, offset, limit);
         } catch (Exception e) {
             return "Error getting references from address: " + e.getMessage();
         }
@@ -120,10 +120,11 @@ public class XrefHandlers {
             }
             
             if (refs.isEmpty()) {
-                return "No references found to function: " + functionName;
+                return "No references found to function: " + functionName + "\n"
+                    + Paginator.paginateWithTotal(refs, offset, limit);
             }
             
-            return Paginator.paginate(refs, offset, limit);
+            return Paginator.paginateWithTotal(refs, offset, limit);
         } catch (Exception e) {
             return "Error getting function references: " + e.getMessage();
         }

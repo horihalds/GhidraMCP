@@ -34,6 +34,33 @@ public final class Paginator {
     }
 
     /**
+     * Like {@link #paginate(List, int, int)} but appends a trailing summary line so a client
+     * can tell whether it needs to request another page: {@code # showing <first>-<last> of
+     * <total>}. An empty listing reports {@code # showing 0 of 0}; an offset past the end (or a
+     * non-positive limit) reports {@code # showing 0 of <total> (offset <start>)}.
+     */
+    public static String paginateWithTotal(List<String> items, int offset, int limit) {
+        int total = items.size();
+        int start = Math.max(0, offset);
+
+        boolean inRange = limit > 0 && start < total;
+        int end = inRange ? (int) Math.min((long) total, (long) start + limit) : start;
+        String body = inRange ? String.join("\n", items.subList(start, end)) : "";
+
+        String summary;
+        if (total == 0) {
+            summary = "# showing 0 of 0";
+        }
+        else if (!inRange) {
+            summary = String.format("# showing 0 of %d (offset %d)", total, start);
+        }
+        else {
+            summary = String.format("# showing %d-%d of %d", start + 1, end, total);
+        }
+        return body.isEmpty() ? summary : body + "\n" + summary;
+    }
+
+    /**
      * Parse an integer from a string, or return defaultValue if null/invalid.
      */
     public static int parseIntOrDefault(String val, int defaultValue) {

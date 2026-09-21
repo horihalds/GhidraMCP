@@ -345,6 +345,12 @@ def _address_params(address: str = None, offset: str = None, block: str = None) 
         params["block"] = block
     return params
 
+def _drop_none(params: dict) -> dict:
+    """
+    Drop keys whose value is None so an omitted argument is never sent as "address=None".
+    """
+    return {key: value for key, value in params.items() if value is not None}
+
 @mcp.tool()
 def list_methods(offset: int = 0, limit: int = 100, instance: str = None,
                  program: str = None) -> list:
@@ -812,6 +818,242 @@ def read_pointer(address: str = None, offset: str = None, block: str = None,
     if follow:
         params["follow"] = "true"
     return "\n".join(safe_get("read_pointer", params, instance=instance, program=program))
+
+@mcp.tool()
+def get_function_details(address: str = None, name: str = None, instance: str = None,
+                         program: str = None) -> str:
+    """
+    Describe one function: signature, calling convention, return type, stack frame, flags,
+    body range and immediate caller/callee counts.
+
+    Supply `address` (the function at or containing it) or `name` (an exact function name);
+    `address` wins when both are given.
+
+    Args:
+        address: Address inside the function, hex (e.g. "0x140001000") or decimal
+        name: Exact function name
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        Key/value lines: name, entry, signature, calling convention, return type, parameter
+        count, stack frame size, body range, flags and immediate caller/callee counts.
+    """
+    return "\n".join(safe_get("get_function_details",
+                              _drop_none({"address": address, "name": name}),
+                              instance=instance, program=program))
+
+@mcp.tool()
+def list_function_variables(address: str = None, name: str = None, offset: int = 0,
+                            limit: int = 100, instance: str = None,
+                            program: str = None) -> list:
+    """
+    List the parameters and local variables of one function, with type, size and storage.
+
+    Args:
+        address: Address inside the function, hex (e.g. "0x140001000") or decimal
+        name: Exact function name
+        offset: Number of variables to skip (default 0)
+        limit: Maximum number of variables to return (default 100, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        One line per variable: "<param|local> <name> : <type> (<n> bytes) [<storage>] @ <address>";
+        auto-parameters are marked with "(auto)". The last line is the "# showing X-Y of N"
+        summary of the listing.
+    """
+    return safe_get("list_function_variables",
+                    _drop_none({"address": address, "name": name,
+                                "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def get_comments(address: str = None, name: str = None, scope: str = None, offset: int = 0,
+                 limit: int = 200, instance: str = None, program: str = None) -> list:
+    """
+    Read the comments stored at one address or anywhere inside a function.
+
+    Args:
+        address: Address to read, or a function containing it, hex or decimal
+        name: Exact function name; when given, the scope defaults to the function body
+        scope: "address" or "function"; default: address when only `address` is given,
+               function when `name` is given
+        offset: Number of commented code units to skip (function scope, default 0)
+        limit: Maximum number of commented code units (function scope, default 200, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        Address scope: "<address>:" followed by one indented "PRE|EOL|PLATE|POST: <text>" line
+        per comment present. Function scope: such a block per commented code unit, followed by
+        the "# showing X-Y of N" summary.
+    """
+    return safe_get("get_comments",
+                    _drop_none({"address": address, "name": name, "scope": scope,
+                                "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def list_data_types(filter: str = None, offset: int = 0, limit: int = 100, instance: str = None,
+                    program: str = None) -> list:
+    """
+    List the data types the program knows, with their kind and size.
+
+    Args:
+        filter: Case-insensitive substring matched against the type name or full path
+        offset: Number of data types to skip (default 0)
+        limit: Maximum number of data types to return (default 100, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        One line per type: "<path> (<kind>, <n> bytes)" with kind one of struct, union, enum,
+        typedef, pointer, array, function or builtin, followed by the "# showing X-Y of N"
+        summary of the listing.
+    """
+    return safe_get("list_data_types",
+                    _drop_none({"filter": filter, "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def get_data_type(name: str, instance: str = None, program: str = None) -> str:
+    """
+    Describe one data type: the fields of a struct/union, the members of an enum, the target of
+    a typedef, or the size and description of a simple type.
+
+    Args:
+        name: Simple type name or full path (e.g. "VECTOR3" or "/user/vector.h/VECTOR3")
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        Name/kind/size/path header plus the kind-specific body. An unknown name answers
+        "Data type not found: '<name>'"; a name matching several types lists the candidates.
+    """
+    return "\n".join(safe_get("get_data_type", {"name": name},
+                              instance=instance, program=program))
+
+@mcp.tool()
+def get_callers(address: str = None, name: str = None, depth: int = 1, offset: int = 0,
+                limit: int = 100, instance: str = None, program: str = None) -> list:
+    """
+    Walk the call graph upwards: the functions that reach this one, level by level.
+
+    Args:
+        address: Address inside the function, hex (e.g. "0x140001000") or decimal
+        name: Exact function name
+        depth: Traversal depth, clamped to 1..4 (default 1)
+        offset: Number of lines to skip (default 0)
+        limit: Maximum number of lines to return (default 100, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        One line per caller: "d<depth> <address> <name> (caller of <previous name>)", followed
+        by the "# showing X-Y of N" summary. A function appears once, at the shallowest depth
+        it is reachable at, so mutual recursion does not loop.
+    """
+    return safe_get("get_callers",
+                    _drop_none({"address": address, "name": name, "depth": depth,
+                                "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def get_callees(address: str = None, name: str = None, depth: int = 1, offset: int = 0,
+                limit: int = 100, instance: str = None, program: str = None) -> list:
+    """
+    Walk the call graph downwards: the functions this one reaches, level by level.
+
+    Args:
+        address: Address inside the function, hex (e.g. "0x140001000") or decimal
+        name: Exact function name
+        depth: Traversal depth, clamped to 1..4 (default 1)
+        offset: Number of lines to skip (default 0)
+        limit: Maximum number of lines to return (default 100, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        One line per callee: "d<depth> <address> <name> (callee of <previous name>)", followed
+        by the "# showing X-Y of N" summary.
+    """
+    return safe_get("get_callees",
+                    _drop_none({"address": address, "name": name, "depth": depth,
+                                "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def search_bytes(pattern: str, block: str = None, offset: int = 0, limit: int = 100,
+                 instance: str = None, program: str = None) -> list:
+    """
+    Search initialized memory for a hex byte pattern; '??' matches any single byte.
+
+    Args:
+        pattern: Whitespace-separated pattern, e.g. "48 8B ?? 40"; max 256 bytes
+        block: Restrict the scan to one memory block by name (e.g. ".text")
+        offset: Number of matches to skip (default 0)
+        limit: Maximum number of matches to return (default 100, max 5000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        One line per match: "0x<address> in <block> (<containing function>): <actual bytes>",
+        followed by the "# showing X-Y of N" summary. The scan stops as soon as the requested
+        page is full, so a full page means more matches may follow.
+    """
+    return safe_get("search_bytes",
+                    _drop_none({"pattern": pattern, "block": block,
+                                "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def search_symbols(query: str, kind: str = "any", case_sensitive: bool = False, offset: int = 0,
+                   limit: int = 100, instance: str = None, program: str = None) -> list:
+    """
+    Search function, label and data symbol names with a regular expression.
+
+    Args:
+        query: Regular expression, e.g. "FUN_.*10$" (not anchored, so it matches anywhere)
+        kind: "any" (default), "function", "label" or "data"
+        case_sensitive: Match case-sensitively (default false)
+        offset: Number of matches to skip (default 0)
+        limit: Maximum number of matches to return (default 100, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        One line per match: "<name> <kind> @ <address>", with the namespace-qualified name when
+        there is one, followed by the "# showing X-Y of N" summary. An invalid regex answers
+        "Invalid regular expression: <message>".
+    """
+    return safe_get("search_symbols",
+                    _drop_none({"query": query, "kind": kind,
+                                "case_sensitive": "true" if case_sensitive else None,
+                                "offset": offset, "limit": limit}),
+                    instance=instance, program=program)
+
+@mcp.tool()
+def get_program_info(offset: int = 0, limit: int = 100, instance: str = None,
+                     program: str = None) -> str:
+    """
+    Describe the loaded program: language, compiler, endianness, image base, address range,
+    counts and the external entry points. Recommended as the first call on a new program.
+
+    Args:
+        offset: Number of entry points to skip (default 0)
+        limit: Maximum number of entry points to return (default 100, max 1000)
+        instance: Target Ghidra instance (id, base URL or port); default: the first one
+        program: Open program in that instance; default: its current program
+
+    Returns:
+        Key/value lines for name, file, language, compiler, endianness, address size, image
+        base, address range, memory blocks, functions, symbols, defined data, executable
+        format and MD5, then "Entry points:" with one "  0x<address> <label>" line per entry
+        point and the "# showing X-Y of N" summary.
+    """
+    return "\n".join(safe_get("get_program_info", {"offset": offset, "limit": limit},
+                              instance=instance, program=program))
 
 @mcp.tool()
 def list_instances(rescan: bool = False) -> list:

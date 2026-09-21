@@ -41,7 +41,7 @@ public class ServerHandlers {
                 languageId(program),
                 program.equals(current) ? "current" : "open"));
         }
-        return Paginator.paginate(lines, offset, limit);
+        return Paginator.paginateWithTotal(lines, offset, limit);
     }
 
     /**

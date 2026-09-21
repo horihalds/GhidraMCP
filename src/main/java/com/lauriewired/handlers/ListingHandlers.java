@@ -31,7 +31,7 @@ public class ListingHandlers {
         for (Function f : program.getFunctionManager().getFunctions(true)) {
             names.add(f.getName());
         }
-        return Paginator.paginate(names, offset, limit);
+        return Paginator.paginateWithTotal(names, offset, limit);
     }
 
     public String getAllClassNames(int offset, int limit) {
@@ -48,7 +48,7 @@ public class ListingHandlers {
         // Convert set to list for pagination
         List<String> sorted = new ArrayList<>(classNames);
         Collections.sort(sorted);
-        return Paginator.paginate(sorted, offset, limit);
+        return Paginator.paginateWithTotal(sorted, offset, limit);
     }
 
     public String listSegments(int offset, int limit) {
@@ -59,7 +59,7 @@ public class ListingHandlers {
         for (MemoryBlock block : program.getMemory().getBlocks()) {
             lines.add(String.format("%s: %s - %s", block.getName(), block.getStart(), block.getEnd()));
         }
-        return Paginator.paginate(lines, offset, limit);
+        return Paginator.paginateWithTotal(lines, offset, limit);
     }
 
     public String listImports(int offset, int limit) {
@@ -70,7 +70,7 @@ public class ListingHandlers {
         for (Symbol symbol : program.getSymbolTable().getExternalSymbols()) {
             lines.add(symbol.getName() + " -> " + symbol.getAddress());
         }
-        return Paginator.paginate(lines, offset, limit);
+        return Paginator.paginateWithTotal(lines, offset, limit);
     }
 
     public String listExports(int offset, int limit) {
@@ -88,7 +88,7 @@ public class ListingHandlers {
                 lines.add(s.getName() + " -> " + s.getAddress());
             }
         }
-        return Paginator.paginate(lines, offset, limit);
+        return Paginator.paginateWithTotal(lines, offset, limit);
     }
 
     public String listNamespaces(int offset, int limit) {
@@ -104,7 +104,7 @@ public class ListingHandlers {
         }
         List<String> sorted = new ArrayList<>(namespaces);
         Collections.sort(sorted);
-        return Paginator.paginate(sorted, offset, limit);
+        return Paginator.paginateWithTotal(sorted, offset, limit);
     }
 
     public String listDefinedData(int offset, int limit) {
@@ -127,7 +127,7 @@ public class ListingHandlers {
                 }
             }
         }
-        return Paginator.paginate(lines, offset, limit);
+        return Paginator.paginateWithTotal(lines, offset, limit);
     }
 
     public String searchFunctionsByName(String searchTerm, int offset, int limit) {
@@ -147,9 +147,10 @@ public class ListingHandlers {
         Collections.sort(matches);
     
         if (matches.isEmpty()) {
-            return "No functions matching '" + searchTerm + "'";
+            return "No functions matching '" + searchTerm + "'\n"
+                + Paginator.paginateWithTotal(matches, offset, limit);
         }
-        return Paginator.paginate(matches, offset, limit);
+        return Paginator.paginateWithTotal(matches, offset, limit);
     }
 
     /**
@@ -159,14 +160,14 @@ public class ListingHandlers {
         Program program = context.getCurrentProgram();
         if (program == null) return "No program loaded";
 
-        StringBuilder result = new StringBuilder();
+        List<String> lines = new ArrayList<>();
         for (Function func : program.getFunctionManager().getFunctions(true)) {
-            result.append(String.format("%s at %s\n", 
-                func.getName(), 
+            lines.add(String.format("%s at %s",
+                func.getName(),
                 func.getEntryPoint()));
         }
 
-        return result.toString();
+        return Paginator.paginateWithTotal(lines, 0, lines.size());
     }
 
 /**
@@ -192,7 +193,7 @@ public class ListingHandlers {
             }
         }
         
-        return Paginator.paginate(lines, offset, limit);
+        return Paginator.paginateWithTotal(lines, offset, limit);
     }
 
     /**

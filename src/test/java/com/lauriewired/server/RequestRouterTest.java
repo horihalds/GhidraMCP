@@ -61,7 +61,10 @@ public class RequestRouterTest {
 
     @Test
     public void appendsTheMultiProgramEndpointsAfterTheHistoricalOnes() {
-        assertEquals(Arrays.asList("/list_open_programs", "/info"),
+        assertEquals(Arrays.asList("/list_open_programs", "/info",
+                "/get_function_details", "/list_function_variables", "/get_comments",
+                "/list_data_types", "/get_data_type", "/get_callers", "/get_callees",
+                "/search_bytes", "/search_symbols", "/get_program_info"),
             RequestRouter.PATHS.subList(HISTORICAL_PATHS.size(), RequestRouter.PATHS.size()));
     }
 
@@ -83,6 +86,16 @@ public class RequestRouterTest {
     public void declaresTheNewEndpointsWithLowerCaseSpelling() {
         assertEquals("/list_open_programs", RequestRouter.LIST_OPEN_PROGRAMS);
         assertEquals("/info", RequestRouter.SERVER_INFO);
+        assertEquals("/get_function_details", RequestRouter.GET_FUNCTION_DETAILS);
+        assertEquals("/list_function_variables", RequestRouter.LIST_FUNCTION_VARIABLES);
+        assertEquals("/get_comments", RequestRouter.GET_COMMENTS);
+        assertEquals("/list_data_types", RequestRouter.LIST_DATA_TYPES);
+        assertEquals("/get_data_type", RequestRouter.GET_DATA_TYPE);
+        assertEquals("/get_callers", RequestRouter.GET_CALLERS);
+        assertEquals("/get_callees", RequestRouter.GET_CALLEES);
+        assertEquals("/search_bytes", RequestRouter.SEARCH_BYTES);
+        assertEquals("/search_symbols", RequestRouter.SEARCH_SYMBOLS);
+        assertEquals("/get_program_info", RequestRouter.GET_PROGRAM_INFO);
     }
 
     @Test

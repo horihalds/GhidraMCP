@@ -8,11 +8,17 @@ import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.util.Msg;
 import ghidra.framework.options.Options;
 
+import com.lauriewired.handlers.CallGraphHandlers;
+import com.lauriewired.handlers.CommentHandlers;
+import com.lauriewired.handlers.DataTypeHandlers;
 import com.lauriewired.handlers.DecompilationHandlers;
+import com.lauriewired.handlers.FunctionHandlers;
 import com.lauriewired.handlers.ListingHandlers;
 import com.lauriewired.handlers.MemoryHandlers;
 import com.lauriewired.handlers.MutationHandlers;
+import com.lauriewired.handlers.ProgramInfoHandlers;
 import com.lauriewired.handlers.PrototypeHandlers;
+import com.lauriewired.handlers.SearchHandlers;
 import com.lauriewired.handlers.ServerHandlers;
 import com.lauriewired.handlers.XrefHandlers;
 import com.lauriewired.server.HttpServerBootstrap;
@@ -41,6 +47,12 @@ public class GhidraMCPPlugin extends Plugin {
     private MutationHandlers mutationHandlers;
     private PrototypeHandlers prototypeHandlers;
     private ServerHandlers serverHandlers;
+    private FunctionHandlers functionHandlers;
+    private CommentHandlers commentHandlers;
+    private DataTypeHandlers dataTypeHandlers;
+    private CallGraphHandlers callGraphHandlers;
+    private SearchHandlers searchHandlers;
+    private ProgramInfoHandlers programInfoHandlers;
     private static final String OPTION_CATEGORY_NAME = "GhidraMCP HTTP Server";
     private static final String PORT_OPTION_NAME = "Server Port";
     private static final int DEFAULT_PORT = 8080;
@@ -59,6 +71,12 @@ public class GhidraMCPPlugin extends Plugin {
         this.mutationHandlers =
             new MutationHandlers(context, decompilerService, prototypeHandlers, this);
         this.serverHandlers = new ServerHandlers(context);
+        this.functionHandlers = new FunctionHandlers(context);
+        this.commentHandlers = new CommentHandlers(context);
+        this.dataTypeHandlers = new DataTypeHandlers(context);
+        this.callGraphHandlers = new CallGraphHandlers(context);
+        this.searchHandlers = new SearchHandlers(context);
+        this.programInfoHandlers = new ProgramInfoHandlers(context);
 
         // Register the configuration option
         Options options = tool.getOptions(OPTION_CATEGORY_NAME);
@@ -231,6 +249,57 @@ public class GhidraMCPPlugin extends Plugin {
 
         router.route(RequestRouter.SERVER_INFO, request ->
             serverHandlers.info(httpServer.getBoundPort()));
+
+        // ----------------------------------------------------------------------------------
+        // Read-only function introspection and comment endpoints
+        // ----------------------------------------------------------------------------------
+        router.route(RequestRouter.GET_FUNCTION_DETAILS, request -> functionHandlers.getFunctionDetails(
+            request.query("address"), request.query("name")));
+
+        router.route(RequestRouter.LIST_FUNCTION_VARIABLES, request ->
+            functionHandlers.listFunctionVariables(request.query("address"), request.query("name"),
+                request.intQuery("offset", 0), request.intQuery("limit", 100)));
+
+        router.route(RequestRouter.GET_COMMENTS, request -> commentHandlers.getComments(
+            request.query("address"), request.query("name"), request.query("scope"),
+            request.intQuery("offset", 0), request.intQuery("limit", 200)));
+
+        // ----------------------------------------------------------------------------------
+        // Read-only data type endpoints
+        // ----------------------------------------------------------------------------------
+        router.route(RequestRouter.LIST_DATA_TYPES, request -> dataTypeHandlers.listDataTypes(
+            request.query("filter"), request.intQuery("offset", 0), request.intQuery("limit", 100)));
+
+        router.route(RequestRouter.GET_DATA_TYPE, request ->
+            dataTypeHandlers.getDataType(request.query("name")));
+
+        // ----------------------------------------------------------------------------------
+        // Read-only call-graph traversal endpoints
+        // ----------------------------------------------------------------------------------
+        router.route(RequestRouter.GET_CALLERS, request -> callGraphHandlers.getCallers(
+            request.query("address"), request.query("name"), request.intQuery("depth", 1),
+            request.intQuery("offset", 0), request.intQuery("limit", 100)));
+
+        router.route(RequestRouter.GET_CALLEES, request -> callGraphHandlers.getCallees(
+            request.query("address"), request.query("name"), request.intQuery("depth", 1),
+            request.intQuery("offset", 0), request.intQuery("limit", 100)));
+
+        // ----------------------------------------------------------------------------------
+        // Read-only search endpoints
+        // ----------------------------------------------------------------------------------
+        router.route(RequestRouter.SEARCH_BYTES, request -> searchHandlers.searchBytes(
+            request.query("pattern"), request.query("block"),
+            request.intQuery("offset", 0), request.intQuery("limit", 100)));
+
+        router.route(RequestRouter.SEARCH_SYMBOLS, request -> searchHandlers.searchSymbols(
+            request.query("query"), request.query("kind"), request.boolQuery("case_sensitive"),
+            request.intQuery("offset", 0), request.intQuery("limit", 100)));
+
+        // ----------------------------------------------------------------------------------
+        // Read-only program metadata endpoint
+        // ----------------------------------------------------------------------------------
+        router.route(RequestRouter.GET_PROGRAM_INFO, request -> programInfoHandlers.getProgramInfo(
+            request.intQuery("offset", 0), request.intQuery("limit", 100)));
     }
 
     @Override

@@ -63,6 +63,36 @@ public class RequestRouter {
     /** Service fingerprint, version and actually bound port of this Ghidra tool. */
     public static final String SERVER_INFO = "/info";
 
+    /** Signature, calling convention, body and call counts of one function. */
+    public static final String GET_FUNCTION_DETAILS = "/get_function_details";
+
+    /** Parameters and local variables of one function, with type and storage. */
+    public static final String LIST_FUNCTION_VARIABLES = "/list_function_variables";
+
+    /** The comments stored at one address or anywhere inside a function. */
+    public static final String GET_COMMENTS = "/get_comments";
+
+    /** Filterable list of every data type with its kind and size. */
+    public static final String LIST_DATA_TYPES = "/list_data_types";
+
+    /** Fields of a struct/union, members of an enum, or the target of a typedef. */
+    public static final String GET_DATA_TYPE = "/get_data_type";
+
+    /** Broadest-first list of the functions that reach a function, up to a depth. */
+    public static final String GET_CALLERS = "/get_callers";
+
+    /** Broadest-first list of the functions a function reaches, up to a depth. */
+    public static final String GET_CALLEES = "/get_callees";
+
+    /** Hex pattern search with wildcards over initialized memory. */
+    public static final String SEARCH_BYTES = "/search_bytes";
+
+    /** Regular-expression search over function, label and data names. */
+    public static final String SEARCH_SYMBOLS = "/search_symbols";
+
+    /** Language, compiler, layout, counts and entry points of one program. */
+    public static final String GET_PROGRAM_INFO = "/get_program_info";
+
     /**
      * The same paths in registration order, so the contract can be asserted mechanically. The
      * 31 historical paths stay at the head of the list; new endpoints are appended.
@@ -74,7 +104,9 @@ public class RequestRouter {
         DISASSEMBLE_FUNCTION, SET_DECOMPILER_COMMENT, SET_DISASSEMBLY_COMMENT,
         RENAME_FUNCTION_BY_ADDRESS, SET_FUNCTION_PROTOTYPE, SET_LOCAL_VARIABLE_TYPE, XREFS_TO,
         XREFS_FROM, FUNCTION_XREFS, STRINGS, READ_BYTES, READ_DATA, READ_STRING, READ_POINTER,
-        LIST_OPEN_PROGRAMS, SERVER_INFO));
+        LIST_OPEN_PROGRAMS, SERVER_INFO, GET_FUNCTION_DETAILS, LIST_FUNCTION_VARIABLES,
+        GET_COMMENTS, LIST_DATA_TYPES, GET_DATA_TYPE, GET_CALLERS, GET_CALLEES,
+        SEARCH_BYTES, SEARCH_SYMBOLS, GET_PROGRAM_INFO));
 
     /** The optional request parameter that selects which open program a request acts on. */
     public static final String PROGRAM_PARAM = "program";
@@ -187,7 +219,7 @@ public class RequestRouter {
     }
 
     /**
-     * @return the number of registered endpoints (33 for a fully wired router)
+     * @return the number of registered endpoints (43 for a fully wired router)
      */
     public int routeCount() {
         return routes.size();
