@@ -21,6 +21,8 @@ MCP Server + Ghidra Plugin
 - Automatically rename methods and data
 - List methods, classes, imports, and exports
 - Read raw bytes, typed data, strings and pointers at virtual addresses, file offsets, or memory block offsets
+- Work across several Ghidra windows and all of their open programs in one session
+- Configurable request timeout, retries and logging in the MCP bridge
 
 # Installation
 
@@ -99,6 +101,111 @@ Another MCP client that supports multiple models on the backend is [5ire](https:
 2. Name: GhidraMCP
 3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
 
+## Bridge options
+`bridge_mcp_ghidra.py` accepts the following flags; all of them are optional:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ghidra-server` | `http://127.0.0.1:8080/` | Base URL of a GhidraMCP server; repeat the flag or separate the URLs with commas, e.g. `--ghidra-server http://127.0.0.1:8080/,http://127.0.0.1:8081/`. These URLs are registered as instances even when `/info` is unavailable |
+| `--scan-ports` | `8080-8090` | Localhost port or range to probe for more GhidraMCP servers; a port is only registered when its `/info` answers with `service=ghidra-mcp`, so an unrelated local service is ignored |
+| `--no-discovery` | off | Do not probe `--scan-ports`; only the `--ghidra-server` URLs are used |
+| `--discovery-timeout` | `0.5` | Seconds to wait for each probed port |
+| `--transport` | `stdio` | MCP transport (`stdio` or `sse`) |
+| `--mcp-host` | `127.0.0.1` | Host to serve the SSE transport on |
+| `--mcp-port` | `8081` | Port to serve the SSE transport on |
+| `--request-timeout` | `30` | Seconds to wait for the plugin; raise it if very large functions time out |
+| `--retries` | `2` | Retries for connection-level failures only, with a short backoff; HTTP errors are never retried |
+| `--log-level` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+If the plugin cannot be reached at all, the tools return a `[bridge] Request failed: ...` line instead of raising, so the client sees why the call failed. HTTP errors keep the plugin's own body (`Error <status>: <body>`).
+
+# Several Ghidra Instances
+One bridge session can address several Ghidra windows and, inside each of them, every open program. Each known window is an *instance*: an explicit `--ghidra-server` URL or a port the probe found, identified as `ghidra-<port>`. Explicit URLs come first, so with no arguments the bridge still talks to `http://127.0.0.1:8080/` exactly as before.
+
+Every tool accepts the same two optional arguments:
+
+| Argument | Meaning |
+|---|---|
+| `instance` | the target window: an id (`ghidra-8081`), a base URL (`http://127.0.0.1:8081/`) or a bare port (`8081`); omit it for the first instance |
+| `program` | the open program to act on in that window; forwarded to the plugin as the `program` parameter described below; omit it for that window's current program |
+
+```python
+decompile_function(name="main", instance="8081", program="libfoo.so")
+list_functions(instance="ghidra-8082")     # program omitted -> that window's current program
+```
+
+`list_instances` shows what the bridge knows (pass `rescan=True` to look for windows started later), and `list_open_programs` shows what can be passed as `program`:
+
+```
+ghidra-8080 | http://127.0.0.1:8080/ | v12.1.3 | current: libfoo.so | programs: 2
+ghidra-8081 | http://127.0.0.1:8081/ | v12.1.3 | current: bar.exe   | programs: 1
+```
+
+An unknown target is reported instead of guessed, listing what is known. The bridge also re-runs discovery once before failing, so a Ghidra window started after the bridge is picked up without restarting it. If nothing answers, the message names the flags that control discovery:
+
+```
+[bridge] Request failed: no Ghidra instance matched '8085'; known instances: ghidra-8080, ghidra-8081 (use --ghidra-server or --scan-ports)
+```
+
+Client configurations that use discovery or an explicit list:
+
+```json
+{"mcpServers": {"ghidra": {"command": "python", "args": ["/ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py", "--scan-ports", "8080-8090"]}}}
+```
+```json
+{"mcpServers": {"ghidra": {"command": "python", "args": ["/ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py", "--ghidra-server", "http://127.0.0.1:8080/,http://127.0.0.1:8081/", "--no-discovery"]}}}
+```
+The SSE transport takes the same flags:
+
+```
+python bridge_mcp_ghidra.py --transport sse --scan-ports 8080-8090
+```
+
+# Selecting a Program
+Every endpoint acts on the program the Ghidra tool currently shows. When more than one program is open, any endpoint also accepts an optional `program` parameter to act on one of the others:
+
+```bash
+curl "http://127.0.0.1:8080/decompile_function?address=0x140001000&program=libfoo.so"
+curl -d "oldName=sub_401000&newName=login" "http://127.0.0.1:8081/renameFunction?program=bar.exe"
+```
+
+The value may be the program name, the domain-file name, a path suffix, or the literal `current` (the default). Matching tries the exact name first, then a case-insensitive name, then the file name, and finally a path suffix. An unknown or ambiguous selector is reported as plain text instead of a program being picked at random:
+
+```
+No program matching 'foo'. Open programs: libfoo.so, bar.exe
+Ambiguous program 'bar': /proj/a/bar, /proj/b/bar
+```
+
+`GET /list_open_programs` lists what can be selected, one line per open program; `offset` (default `0`) and `limit` (default `100`) behave like the other listing endpoints:
+
+```bash
+curl "http://127.0.0.1:8080/list_open_programs"
+```
+```
+libfoo.so | /proj/libfoo.so | x86:LE:64:default | current
+bar.exe   | /proj/bar.exe   | x86:LE:32:default | open
+```
+
+The two endpoints that describe what is selected in the Ghidra UI, `/get_current_address` and `/get_current_function`, always answer for the tool's visible program and ignore `program` by design.
+
+# Running Several Ghidra Windows
+Every Ghidra window reads the same `Server Port` option, which defaults to `8080`. When that port is already bound, the plugin listens on the next free port within the following ten ports instead of failing to start, logs the port it uses, and leaves the option untouched; two windows therefore coexist without any manual configuration.
+
+`GET /info` reports what the server is: the fingerprint, the extension version, the port it is actually bound to and the programs that are open:
+
+```bash
+curl "http://127.0.0.1:8081/info"
+```
+```
+service=ghidra-mcp
+version=12.1.3
+port=8081
+programs=1
+current=bar.exe
+```
+
+The `service=ghidra-mcp` line is the fingerprint the bridge looks for when it probes a port range, and `port` may differ from the configured value.
+
 # Reading Memory
 The bridge exposes four read-only tools (`read_bytes`, `read_data`, `read_string`, `read_pointer`) backed by the matching HTTP endpoints. Every endpoint accepts one of three addressing modes:
 
@@ -138,6 +245,38 @@ Read a pointer-sized value, decoded using the program endianness; `size` default
 ```bash
 curl "http://127.0.0.1:8080/read_pointer?address=0x140021000&follow=true"
 ```
+
+Responses are UTF-8 plain text. Non-ASCII characters in listing and memory output (for example a non-ASCII symbol label) are escaped as full code units, e.g. `caf\xe9`; characters above `U+00FF` keep their whole value instead of being truncated to one byte.
+
+# Development
+The extension is split into small, single-responsibility packages:
+
+```
+src/main/java/com/lauriewired/
+  GhidraMCPPlugin.java   plugin lifecycle only: tool option, server start/stop, dispose
+  server/                embedded HTTP server: bootstrap, single route table, responses
+  handlers/              one class per endpoint group: listing, xrefs, memory,
+                         decompilation, mutations, prototypes, server metadata
+  service/               shared Ghidra access: current program, Swing transactions,
+                         decompiler reuse, address resolution
+  util/                  dependency-free helpers: query/body parsing, pagination, escaping
+```
+
+Run the unit tests:
+
+```bash
+mvn -o test
+```
+
+The suites cover the dependency-free helpers in `util/` and pin the historical endpoint paths of the route table, so they need neither a Ghidra runtime nor a free network port. Compiling at all still requires the Ghidra jars listed below.
+
+Build the installable extension:
+
+```bash
+mvn -o package
+```
+
+This produces `target/GhidraMCP.jar` and `target/GhidraMCP-1.0-SNAPSHOT.zip`.
 
 # Building from Source
 1. Copy the following files from your Ghidra directory to this project's `lib/` directory:
